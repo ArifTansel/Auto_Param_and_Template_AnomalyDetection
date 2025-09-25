@@ -1,16 +1,20 @@
 # Log Anomaly Detection with Template Extraction and BiLSTM-Attention
 
 ## Overview
+
 This project implements a log anomaly detection pipeline that combines **Drain3 log template mining**, **LLM-based parameter type extraction**, **BERT-based template embeddings**, and a **BiLSTM with attention mechanism**.  
 The pipeline transforms raw log lines into structured embeddings that encode templates, timestamps, and connection durations. These embeddings are then fed into a BiLSTM-attention model for sequence learning and anomaly detection.
+
 ---
 ## Key Features
+
 - **Log Template Mining**: Uses [Drain3](https://github.com/IBM/drain3) to automatically parse logs into templates.
 - **Parameter Extraction with LLM**: Employs an LLM (Google Gemini API) to infer parameter types (`USER`, `DATETIME`, `IP`, `DURATION`, `BLKNO`, or `*`) from log templates.
 - **Template Embedding**: Encodes templates into dense vectors with a BERT model (`bert-base-uncased`).
 - **Time Encoding**: Converts timestamps into cyclic features using sine/cosine transformations for hours, minutes, seconds, days, and months.
 - **Connection Time Embedding**: Standardizes connection duration into a scaled numerical feature.
 - **BiLSTM with Attention**: Learns sequential dependencies in log data and uses attention weights to highlight important events.
+
 ---
 
 ## Workflow
@@ -69,6 +73,7 @@ python-dotenv
     ```
   - Update **ENV_FILE** in the script to the correct path of `.env`.
 ---
+
 # How to Run
 1. Prepare Logs
   Place your log file (e.g., HDFS.log) in the project directory.
@@ -84,9 +89,14 @@ python-dotenv
     ```
 4. Attention Visualization
   Attention weights are recorded during training and can be visualized using `matplotlib`.
+
+---
+
 # Notes
-The LLM parameter extraction step may fail occasionally; retries are implemented automatically.
-Ensure logs contain consistent timestamp formats; adjust parsing in datetime.strptime if needed.
+
+- The LLM parameter extraction step may fail occasionally; retries are implemented automatically.
+
+- Ensure logs contain consistent timestamp formats; adjust parsing in datetime.strptime if needed.
 The embedding dimension for concatenated vectors must match the model’s input_dim.
 
 <img width="366" height="297" alt="image" src="https://github.com/user-attachments/assets/7bff1d63-fb95-45f9-b19e-a6495f7e6a32" />
