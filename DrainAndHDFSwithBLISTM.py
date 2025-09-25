@@ -250,70 +250,48 @@ duration = df["DURATION"].fillna(0).astype(float).values.reshape(-1, 1)
 duration_scaler = StandardScaler()
 duration_scaler.fit(duration)
 df["duration_scaled"] = duration_scaler.transform(duration)
-df["combined_embed"] = df.apply(
-    lambda row: np.concatenate([row["template_embed"], row["date_embed"], np.array([row["duration_scaled"]]).reshape(1,)]),
-    axis=1
-)
-
-df["combined_embed"]
-
-"""# BILSTM With Sliding Window
-
-## Create Sliding Window
-"""
-
-df = df.sample(frac=1).reset_index(drop=True)
-
-window_size = 20  # template window, or adjust
-sequences = []
-n = len(df)
-train_end = int(n * 0.8)
-
-df_train = df.iloc[:train_end]
-df_test  = df.iloc[train_end:]
-
-df_train.sort_values(by="date", inplace=True)
-df_test.sort_values(by="date", inplace=True)
-
-def make_windows(data, window_size=10):
-    X, Y, U = [], [], []
-    for i in range(len(data) - window_size):
-        # input: window of embeddings
-        X.append(np.stack(data["combined_embed"].iloc[i:i+window_size]))
-        # target: next template embedding
-        Y.append(data["combined_embed"].iloc[i+window_size])
-        # user: ID of the target log
-        U.append(data["user_id"].iloc[i+window_size])
-    return np.array(X), np.array(Y), np.array(U)
+combined = np.vstack([
+    np.concatenate([
+        row["template_embed"],
+        row["date_embed"],
+        np.array([row["duration_scaled"]])
+    ])
+    for _, row in df.iterrows()
+])
 
 
-X_train, Y_train ,U_train   = make_windows(df_train)
-X_test,  Y_test , U_test    = make_windows(df_test)
+import numpy as np
+
+# tüm veriyi RAM'e alıyoruz
+mu = combined.mean(axis=0, keepdims=True)   # ortalama
+sigma = combined.std(axis=0, keepdims=True) + 1e-8  # std + epsilon
+
 
 import torch
-mu = X_train.mean(axis=(0,1), keepdims=True)   # shape: (1,1,embed_dim)
-sigma = X_train.std(axis=(0,1), keepdims=True) + 1e-8
+from torch.utils.data import Dataset, DataLoader
 
-X_train_norm = (X_train - mu) / sigma
-X_test_norm  = (X_test  - mu) / sigma
+class LogDataset(Dataset):
+    def __init__(self, array, window_size, mu=None, sigma=None):
+        # Burada doğrudan RAM’deki numpy array’i kullanıyoruz
+        self.embeds = array
+        self.window_size = window_size
+        self.mu = mu
+        self.sigma = sigma
 
-template_dim = df_train["template_embed"].iloc[0].shape[0]  # 768
+    def __len__(self):
+        return len(self.embeds) - self.window_size
 
-# compute mu and sigma for template embeddings only
-mu_y = Y_train.mean(axis=0, keepdims=True)      # shape (1, template_dim)
-sigma_y = Y_train.std(axis=0, keepdims=True) + 1e-8
+    def __getitem__(self, idx):
+        X = (self.embeds[idx:idx+self.window_size] - self.mu) / self.sigma
+        Y = (self.embeds[idx+self.window_size] - self.mu) / self.sigma
+        return torch.from_numpy(X).float(), torch.from_numpy(Y).float().squeeze()
 
-Y_train_norm = (Y_train - mu_y) / sigma_y
-Y_test_norm  = (Y_test  - mu_y) / sigma_y
+# Kullanım
+window_size = 20
+dataset = LogDataset(combined, window_size, mu, sigma)  # memmap yerine RAM'deki array
+loader = DataLoader(dataset, batch_size=1024, shuffle=False,pin_memory=True, num_workers=8 ,persistent_workers=True)
 
-X_train_t = torch.tensor(X_train_norm, dtype=torch.float32)
-Y_train_t = torch.tensor(Y_train_norm, dtype=torch.float32)
 
-U_train_t = torch.tensor(U_train, dtype=torch.long)
-U_test_t  = torch.tensor(U_test, dtype=torch.long)
-
-X_test_t = torch.tensor(X_test_norm, dtype=torch.float32)
-Y_test_t  = torch.tensor(Y_test_norm, dtype=torch.float32)
 
 class Attention(nn.Module):
     def __init__(self, hidden_dim):
@@ -350,12 +328,7 @@ class LogBiLSTM(nn.Module):
 
 from torch.utils.data import TensorDataset, DataLoader
 
-train_dataset = TensorDataset(torch.tensor(X_train_t, dtype=torch.float32),
-                              torch.tensor(Y_train_t, dtype=torch.float32),
-                               torch.tensor(U_train_t, dtype=torch.long))
-train_loader = DataLoader(train_dataset, batch_size=512, shuffle=False)
-
-model = LogBiLSTM(input_dim=X_train_t.shape[2], hidden_dim=256, output_dim=781 )
+model = LogBiLSTM(input_dim=781, hidden_dim=256, output_dim=781 )
 
 import torch
 import torch.nn as nn
@@ -366,88 +339,33 @@ optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
 num_epochs = 150
 attn_records = [] 
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+criterion = nn.MSELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)  # sabit LR
+
+num_epochs = 500
+attn_records = []
 
 for epoch in range(num_epochs):
-    model.train()
     total_loss = 0
-    for i, (X_batch, Y_batch, user_batch) in enumerate(train_loader):
+    for i, (X_batch, Y_batch) in tqdm(enumerate(loader), total=len(loader)):
+        X_batch = X_batch.to(device)
+        Y_batch = Y_batch.to(device)
         optimizer.zero_grad()
         output, attn_weights = model(X_batch)  # attention dönüyor
-
         loss = criterion(output, Y_batch)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        optimizer.step()  # sadece 1 kez çağır
         total_loss += loss.item()
+        if i == 10:  # attention kaydet
+            attn_records.append(attn_weights[0].detach().cpu().numpy())
+    print(f"Epoch {epoch+1}, Train Loss: {total_loss/len(loader):.4f}")
+    if epoch % 10 == 0:
+        torch.save(model.state_dict(), f"log_bilstmagain{epoch}_{total_loss/len(loader):.4f}.pth")
 
-        if i == 10:
-          print("recorded")
-          attn_records.append(attn_weights[0].detach().cpu().numpy())
-
-    print(f"Epoch {epoch+1}, Train Loss: {total_loss/len(train_loader):.4f}")
-
-model.eval()
-with torch.no_grad():
-    test_output, attn_weights = model(X_test_t )
-    errors = ((test_output - Y_test_t) ** 2).mean(dim=1)  # shape: (num_windows,)
-
-import numpy as np
-
-def explain_anomaly_v2(idx, test_output, Y_test_t ):
-    """
-    Bir anomaliyi, özellik bazında tahmin hatasını (MSE) hesaplayarak açıklar.
-
-    Args:
-        idx (int): Test setindeki anomalinin indeksi.
-        test_output (torch.Tensor): Modelin test seti için yaptığı tüm tahminler.
-        Y_test_t (torch.Tensor): Test setinin gerçek değerleri.
-
-    Returns:
-        tuple: (Hata sözlüğü, Açıklama metni)
-    """
-    diff = (test_output[idx] - Y_train_t[idx]).cpu().numpy()
-    sizes = {"template": 768, "date": 12, "duration": 1} # ADJUST IT 
-    start = 0
-    errors_mse = {}
-    for feature_name, size in sizes.items():
-        part = diff[start:start + size]
-
-        errors_mse[feature_name] = np.mean(np.square(part))
-
-        start += size
-    main_feature = max(errors_mse, key=errors_mse.get)
-
-    explanation = (
-        f"Bu log penceresi anormal çünkü '{main_feature}' özelliğinin tahmini "
-        f"beklenenden çok farklı.\n"
-        f"Özellik bazında ortalama hata (MSE): {errors_mse}"
-    )
-
-    return errors_mse, explanation
-
-threshold = errors.mean() + 2 * errors.std()
-anomalies_idx = torch.where(errors > threshold)[0] 
-for i in range(len(anomalies_idx)):
-  idx = anomalies_idx[i]
-  errories, reason = explain_anomaly_v2(idx, test_output, Y_test_t )
-  print(errories)  
-  print("\n")
-  print(reason)  
-  print("\n")
-  print(df_test.iloc[int(idx)]['log'])
-  print("---------------------------------------------------------------------------")
-
-import matplotlib.pyplot as plt
-
-plt.plot(errors.numpy())
-plt.xlabel("Window index")
-plt.ylabel("MSE error")
-plt.title("Prediction error per window")
-plt.show()
-
-threshold = errors.mean() + 2*errors.std()
-anomalies = torch.where(errors > threshold)[0]
-print("Anomalous windows:", anomalies)
-
-anomalous_logs = df_train.iloc[anomalies_idx]
 
